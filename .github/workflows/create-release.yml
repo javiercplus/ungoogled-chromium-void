@@ -85,8 +85,8 @@ jobs:
         env:
           XBPS_PASSPHRASE: ${{ secrets.SUPERBIA }}
         run: |
-          su - builder -c 'cd /tmp/void-packages && ./xbps-src binary-bootstrap'
-          su - builder -c 'cd /tmp/void-packages && ./xbps-src pkg ungoogled-chromium'
+          sudo -E -u builder bash -c 'cd /tmp/void-packages && ./xbps-src binary-bootstrap'
+          sudo -E -u builder bash -c 'cd /tmp/void-packages && ./xbps-src pkg ungoogled-chromium'
 
           echo "=== Produced packages ==="
           ls -la /tmp/void-packages/hostdir/binpkgs/ungoogled-chromium* || true

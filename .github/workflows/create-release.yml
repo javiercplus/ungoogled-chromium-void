@@ -56,8 +56,7 @@ jobs:
         run: |
           xbps-install -Syu --repository=https://repo-de.voidlinux.org/current/ xbps
           xbps-install -Suyd --repository=https://repo-de.voidlinux.org/current/
-          xbps-install -y --repository=https://repo-de.voidlinux.org/current/ \
-            base-chroot base-devel git curl ca-certificates \
+          xbps-install -y --repository=https://repo-de.voidlinux.org/current/ base-devel git curl ca-certificates \
             python3 bash sudo xtools openssl tar xz
 
           # Create the build user. xbps-src refuses to run as root, and the

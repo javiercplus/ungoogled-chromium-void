@@ -58,15 +58,11 @@ jobs:
           xbps-install -Syu --repository=https://repo-de.voidlinux.org/current/ xbps
           xbps-install -Suyd --repository=https://repo-de.voidlinux.org/current/
           xbps-install -y --repository=https://repo-de.voidlinux.org/current/ base-devel git curl ca-certificates \
-            python3 bash sudo xtools openssl tar xz shadow pam pam-base
+            python3 bash xtools openssl tar xz shadow
 
+          # Solo creamos el usuario; no se necesita sudoers, ni contraseñas, ni PAM
           groupadd -f xbuilder
           useradd -m -s /bin/bash -G xbuilder builder
-          
-          passwd -d builder
-          
-          echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
-          chmod 0440 /etc/sudoers.d/builder
           
       - name: Checkout this repository
         run: git clone https://github.com/${{ github.repository }}.git repo
@@ -89,8 +85,9 @@ jobs:
         env:
           XBPS_PASSPHRASE: ${{ secrets.SUPERBIA }}
         run: |
-          sudo -E -u builder bash -c 'cd /tmp/void-packages && ./xbps-src binary-bootstrap'
-          sudo -E -u builder bash -c 'cd /tmp/void-packages && ./xbps-src pkg ungoogled-chromium'
+          # chroot --userspec salta directamente a la cuenta del usuario preservando las variables de entorno
+          chroot --userspec=builder:builder / bash -c 'cd /tmp/void-packages && ./xbps-src binary-bootstrap'
+          chroot --userspec=builder:builder / bash -c 'cd /tmp/void-packages && ./xbps-src pkg ungoogled-chromium'
 
           echo "=== Produced packages ==="
           ls -la /tmp/void-packages/hostdir/binpkgs/ungoogled-chromium* || true

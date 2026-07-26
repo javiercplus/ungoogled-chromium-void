@@ -12,7 +12,6 @@ on:
 
 jobs:
   Fetch:
-    if: github.repository == 'KevinRunforrestt/ungoogled-chromium-void'
     runs-on: ubuntu-latest
     outputs:
       ver: ${{ steps.version.outputs.ver }}
@@ -46,6 +45,8 @@ jobs:
           echo "rev=$( grep -m 1 'revision=' master/void-packages/srcpkgs/ungoogled-chromium/template | awk -F '=' '{ print $2 }' )" >> $GITHUB_OUTPUT
 
   Build:
+    needs: Fetch
+    if: needs.Fetch.outputs.skip_ci == 'false'
     runs-on: ubuntu-22.04
     timeout-minutes: 1440
     container:
@@ -67,9 +68,7 @@ jobs:
           echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
           
       - name: Checkout this repository
-        uses: actions/checkout@v4
-        with:
-          path: repo
+        run: git clone https://github.com/${{ github.repository }}.git repo
 
       - name: Clone void-packages and overlay our template
         env:
@@ -97,7 +96,7 @@ jobs:
           ls -la /tmp/void-packages/hostdir/binpkgs/ungoogled-chromium* || true
 
       - name: Sign packages (optional — only if SHIRAORI_PEM is set)
-        env:
+        env:pero debo 
           SHIRAORI_PEM: ${{ secrets.SHIRAORI_PEM }}
           XBPS_PASSPHRASE: ${{ secrets.SUPERBIA }}
         run: |
@@ -120,7 +119,7 @@ jobs:
           xbps-rindex --sign --signedby "Shiraori archive" \
             --privkey /tmp/shiraori.pem "$PWD"
 
-          xbps-rindex --sign-pkg --privkey /tmp/shiraori.pem \
+          xbps-rindex --sign-pkg --privkey /tmp/shiraori.pem \pero debo 
             "ungoogled-chromium-${PKG_VER}_${PKG_REV}.${XBPS_TARGET_ARCH}.xbps"
           xbps-rindex --sign-pkg --privkey /tmp/shiraori.pem \
             "ungoogled-chromium-qt6-${PKG_VER}_${PKG_REV}.${XBPS_TARGET_ARCH}.xbps"

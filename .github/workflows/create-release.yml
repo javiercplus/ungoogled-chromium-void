@@ -57,8 +57,9 @@ jobs:
         run: |
           xbps-install -Syu --repository=https://repo-de.voidlinux.org/current/ xbps
           xbps-install -Suyd --repository=https://repo-de.voidlinux.org/current/
+          # Se añadió util-linux al final de la siguiente línea
           xbps-install -y --repository=https://repo-de.voidlinux.org/current/ base-devel git curl ca-certificates \
-            python3 bash xtools openssl tar xz shadow
+            python3 bash xtools openssl tar xz shadow util-linux
 
           # Solo creamos el usuario; no se necesita sudoers, ni contraseñas, ni PAM
           groupadd -f xbuilder

@@ -1,59 +1,7 @@
 name: Create release
-
-# This workflow builds ungoogled-chromium for x86_64 (glibc) and x86_64-musl
-# on GitHub-hosted runners, using the official void-linux/void-mklive image
-# on GHCR (the same one used by github.com/javiercplus/repo-neko).
-#
-# Why void-mklive instead of voidlinux/voidlinux?
-#   - The 2021 voidlinux/voidlinux{,-musl} images on Docker Hub ship an xbps
-#     so old that it can't validate current TLS certificates
-#     ("SSL certificate subject doesn't match host ... Operation not permitted").
-#   - void-mklive is built from the live ISO master and is refreshed regularly
-#     (tags like 20250116R1, 20250227R1). It ships a modern xbps + modern
-#     ca-certificates, so `xbps-install -Syu` works out of the box.
-#
-# Why a single glibc image for both arches?
-#   - void-mklive only publishes amd64/arm64 glibc images. There is no musl
-#     variant. We don't need one: xbps-src's `-A x86_64-musl` flag does a
-#     cross-build from a glibc host, downloading the musl bootstrap tarball
-#     from repo-default.voidlinux.org/current/musl. This is exactly how the
-#     void-linux/void-packages CI itself tests musl builds.
-#
-# Flow:
-#   Fetch   (ubuntu-latest)  - reads version/revision from the template
-#   Build   (ubuntu-22.04 + container void-mklive, matrix [glibc, musl])
-#           - updates xbps itself before anything else (uses --repository
-#             to bypass the broken default mirror config)
-#           - installs runtime deps + xtools + sudo
-#           - creates a 'builder' user in group 'xbuilder' so xbps-src can
-#             use xbps-uchroot via the setuid helper
-#           - clones void-packages, overlays our template
-#           - runs: binary-bootstrap  →  fetch  →  pkg
-#             (xbps-src internally calls xbps-create to assemble the .xbps
-#              from $DESTDIR, then xbps-rindex -a to add it to hostdir/binpkgs)
-#           - optionally signs packages with the SHIRAORI_PEM secret
-#           - uploads .xbps (+.sig2 + repodata) as workflow artifacts
-#   Release (ubuntu-latest)  - downloads both arch artifacts, creates release
-#   Cleanup  (ubuntu-latest) - prunes old releases (keep_latest: 5)
-#
-# Required secrets (Settings → Secrets and variables → Actions):
-#   SUPERBIA       - passphrase for shiraori.pem (used by xbps-rindex --sign)
-#   SHIRAORI_PEM   - private key (PEM body) used to sign packages
-# If SHIRAORI_PEM is empty, the sign step is skipped (release still happens,
-# just without signatures).
-#
-# Resource notes:
-#   ubuntu-latest         = 4 cores,  16 GB RAM, 14 GB disk
-#   ubuntu-latest-large   = 8 cores,  32 GB RAM, 64 GB disk  (requires Team plan)
-#   ubuntu-latest-xlarge  = 16 cores, 64 GB RAM, 80 GB disk  (requires Team plan)
-# Chromium links with ~30 GB RAM when LTO is off (it is, per template).
-# On ubuntu-latest the build WILL run but may OOM-kill the linker; if that
-# happens, bump runs-on to ubuntu-latest-large or ubuntu-latest-xlarge.
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: false
-
 on:
   workflow_dispatch:
   push:
@@ -98,86 +46,17 @@ jobs:
           echo "rev=$( grep -m 1 'revision=' master/void-packages/srcpkgs/ungoogled-chromium/template | awk -F '=' '{ print $2 }' )" >> $GITHUB_OUTPUT
 
   Build:
-    needs: [Fetch]
-    if: needs.Fetch.outputs.skip_ci == 'false'
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        include:
-          # XBPS_ARCH is what xbps-src will pass to its target. -A is the
-          # shortcut xbps-src exposes for setting it.
-          #   x86_64       = native glibc build (container is glibc/amd64)
-          #   x86_64-musl  = cross build: glibc host compiles musl target via
-          #                  the musl bootstrap tarball from
-          #                  repo-fastly.voidlinux.org/current/musl
-          - arch: x86_64
-            description: "glibc"
-            # glibc repo lives at the root of /current/
-            repo: "https://repo-fastly.voidlinux.org/current/"
-          - arch: x86_64-musl
-            description: "musl"
-            # musl repo lives under /current/musl/
-            repo: "https://repo-fastly.voidlinux.org/current/musl/"
-    # ubuntu-22.04 is what repo-neko uses and is known to work with
-    # `container: image: ghcr.io/void-linux/void-mklive:...` + --privileged.
     runs-on: ubuntu-22.04
     timeout-minutes: 1440
     container:
-      image: ghcr.io/void-linux/void-mklive:20250116R1
+      image: ghcr.io/void-linux/void-musl:20260701r1
       options: --privileged
-    env:
-      XBPS_TARGET_ARCH: ${{ matrix.arch }}
-      PKG_VER: ${{ needs.Fetch.outputs.ver }}
-      PKG_REV: ${{ needs.Fetch.outputs.rev }}
-      # The default mirror baked into the image (alpha.de.repo.voidlinux.org)
-      # has an expired / mismatched TLS cert and the host no longer exists.
-      # Force the Fastly CDN mirror for every xbps-install call below.
-      XBPS_REPO: ${{ matrix.repo }}
     steps:
-      - name: Force Fastly CDN mirror and install tools
-        # ============================================================
-        # CRITICAL — read this before editing.
-        # ============================================================
-        # The container (ghcr.io/void-linux/void-mklive) is ALWAYS glibc
-        # on amd64, even when we cross-build for musl. So the HOST's
-        # /etc/xbps.d/ must ONLY list glibc repos — listing the musl repo
-        # here caused xbps-install to download musl .xbps packages
-        # (musl-1.2.5_3, xbps-0.60.7_1.x86_64-musl.xbps, ...) and install
-        # them on top of the glibc rootfs, which produced:
-        #   Error relocating /lib/libarchive.so.13: __open_2: symbol not found
-        #   Error relocating /lib/libarchive.so.13: __snprintf_chk: symbol not found
-        #   ... (and exit code 127)
-        #
-        # The musl repo IS still needed, but only INSIDE the xbps-src
-        # build chroot — xbps-src copies void-packages/etc/xbps.d/
-        # into the chroot and selects the right repos-remote-*.conf
-        # based on XBPS_ARCH. We rewrite those files in a later step
-        # to also point at Fastly.
-        env:
-          XBPS_REPO: ${{ matrix.repo }}
+      - name: Fix SSL and install tools
         run: |
-          echo "Target arch:    ${XBPS_TARGET_ARCH}"
-          echo "Using XBPS repo: ${XBPS_REPO}  (used only for the musl target inside xbps-src)"
-
-          # The HOST container is glibc, regardless of XBPS_TARGET_ARCH.
-          # Wipe any xbps.d fragments the image might ship and write a
-          # single one pointing at the Fastly glibc repo.
-          rm -f /etc/xbps.d/*.conf
-          mkdir -p /etc/xbps.d
-          cat > /etc/xbps.d/00-repository-main.conf <<'EOF'
-          repository=https://repo-fastly.voidlinux.org/current/
-          EOF
-
-          echo "=== /etc/xbps.d/00-repository-main.conf (HOST, always glibc) ==="
-          cat /etc/xbps.d/00-repository-main.conf
-
-          # Two-step update: upgrade xbps itself first (so it can handle
-          # current repo signatures), then the rest of the system, then
-          # the runtime deps we need for xbps-src + signing.
-          xbps-install -Syu xbps
-          xbps-install -Suyd
-          xbps-install -y \
+          xbps-install -Syu --repository=https://repo-de.voidlinux.org/current/ xbps
+          xbps-install -Suyd --repository=https://repo-de.voidlinux.org/current/
+          xbps-install -y --repository=https://repo-de.voidlinux.org/current/ \
             base-chroot base-devel git curl ca-certificates \
             python3 bash sudo xtools openssl tar xz
 
@@ -194,81 +73,14 @@ jobs:
 
       - name: Clone void-packages and overlay our template
         env:
-          # GITHUB_WORKSPACE inside a `container:` block points at the
-          # mount root (typically /__w/<repo>/<repo>). The `repo/` subdir
-          # is where actions/checkout just dropped our source tree.
           WS: ${{ github.workspace }}
         run: |
           git clone --depth 1 https://github.com/void-linux/void-packages.git /tmp/void-packages
           cd /tmp/void-packages
-
           # Replace the upstream ungoogled-chromium template with ours.
           rm -rf srcpkgs/ungoogled-chromium srcpkgs/ungoogled-chromium-qt6
           cp -r "${WS}/repo/void-packages/srcpkgs/ungoogled-chromium"    srcpkgs/
           cp -r "${WS}/repo/void-packages/srcpkgs/ungoogled-chromium-qt6" srcpkgs/
-
-          # ============================================================
-          # Rewrite xbps-src's repo fragments to point at Fastly CDN.
-          # ============================================================
-          # void-packages ships etc/xbps.d/repos-remote*.conf that point
-          # at repo-default.voidlinux.org, which sometimes resolves to
-          # mirrors with expired TLS certs (alpha.de.repo.voidlinux.org).
-          # xbps-src copies these files into the build chroot and selects
-          # the right one based on XBPS_ARCH (repos-remote.conf for glibc,
-          # repos-remote-musl.conf for musl, repos-remote-x86_64-multilib
-          # for multilib, etc.).
-          #
-          # We rewrite ALL of them to point at Fastly so xbps-src's
-          # internal xbps-install / xbps-query calls work regardless of
-          # which arch xbps-src is targeting.
-          for f in etc/xbps.d/repos-remote*.conf; do
-            case "$f" in
-              *musl*)
-                # musl repo lives under /current/musl/
-                cat > "$f" <<'EOF'
-          repository=https://repo-fastly.voidlinux.org/current/musl/bootstrap
-          repository=https://repo-fastly.voidlinux.org/current/musl
-          repository=https://repo-fastly.voidlinux.org/current/musl/nonfree
-          repository=https://repo-fastly.voidlinux.org/current/musl/debug
-          EOF
-                ;;
-              *multilib*)
-                # multilib repo lives under /current/multilib/
-                cat > "$f" <<'EOF'
-          repository=https://repo-fastly.voidlinux.org/current/multilib/bootstrap
-          repository=https://repo-fastly.voidlinux.org/current/multilib
-          repository=https://repo-fastly.voidlinux.org/current/multilib/nonfree
-          EOF
-                ;;
-              *)
-                # Default: glibc repo at /current/
-                cat > "$f" <<'EOF'
-          repository=https://repo-fastly.voidlinux.org/current/bootstrap
-          repository=https://repo-fastly.voidlinux.org/current
-          repository=https://repo-fastly.voidlinux.org/current/nonfree
-          repository=https://repo-fastly.voidlinux.org/current/debug
-          EOF
-                ;;
-            esac
-          done
-
-          # Also append XBPS_DISTFILES_MIRROR to etc/conf so xbps-src's
-          # fetch step downloads distfiles from Fastly too.
-          cat >> etc/conf <<EOF
-
-          # Added by create-release.yml — force Fastly CDN mirror for distfiles
-          XBPS_DISTFILES_MIRROR=https://repo-fastly.voidlinux.org/current
-          EOF
-
-          echo "=== void-packages/etc/xbps.d/repos-remote.conf (glibc) ==="
-          cat etc/xbps.d/repos-remote.conf
-          echo
-          echo "=== void-packages/etc/xbps.d/repos-remote-musl.conf ==="
-          cat etc/xbps.d/repos-remote-musl.conf 2>/dev/null || echo "(not present)"
-          echo
-          echo "=== void-packages/etc/conf (tail) ==="
-          tail -5 etc/conf
-          echo
           echo "=== Template head (sanity check) ==="
           grep -E '^(version|revision|_rollup|_commit_id)=' srcpkgs/ungoogled-chromium/template
 
@@ -278,13 +90,8 @@ jobs:
         env:
           XBPS_PASSPHRASE: ${{ secrets.SUPERBIA }}
         run: |
-          # Run as 'builder' so xbps-src can use xbps-uchroot (setuid).
-          # -A ${{ matrix.arch }} tells xbps-src the target arch. For musl,
-          # xbps-src will automatically download the musl bootstrap tarball
-          # from the musl/ subrepo.
-          su - builder -c 'cd /tmp/void-packages && ./xbps-src -A '"${XBPS_TARGET_ARCH}"' binary-bootstrap'
-          su - builder -c 'cd /tmp/void-packages && ./xbps-src -A '"${XBPS_TARGET_ARCH}"' fetch ungoogled-chromium'
-          su - builder -c 'cd /tmp/void-packages && ./xbps-src -A '"${XBPS_TARGET_ARCH}"' -C pkg ungoogled-chromium'
+          su - builder -c 'cd /tmp/void-packages && ./xbps-src binary-bootstrap'
+          su - builder -c 'cd /tmp/void-packages && ./xbps-src pkg ungoogled-chromium'
 
           echo "=== Produced packages ==="
           ls -la /tmp/void-packages/hostdir/binpkgs/ungoogled-chromium* || true
@@ -357,8 +164,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: |
-            Chromium release: ${{ needs.Fetch.outputs.ver }}
-            Ungoogled Chromium release: ${{ needs.Fetch.outputs.ver }}-${{ needs.Fetch.outputs.rev }}
+            Chromium release: <a href='https://chromium.googlesource.com/chromium/src/+/refs/tags/${{ needs.Fetch.outputs.ver }}'>${{ needs.Fetch.outputs.ver }}</a>
+            Ungoogled Chromium release: <a href='https://github.com/ungoogled-software/ungoogled-chromium/releases/tag/${{ needs.Fetch.outputs.ver }}-${{ needs.Fetch.outputs.rev }}'>${{ needs.Fetch.outputs.ver }}-${{ needs.Fetch.outputs.rev }}</a>
           files: |
             binpkgs/ungoogled-chromium-${{ needs.Fetch.outputs.ver }}_${{ needs.Fetch.outputs.rev }}.x86_64.xbps
             binpkgs/ungoogled-chromium-qt6-${{ needs.Fetch.outputs.ver }}_${{ needs.Fetch.outputs.rev }}.x86_64.xbps
